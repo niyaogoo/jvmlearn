@@ -292,33 +292,35 @@ void LogOutputList::add_output(LogOutput* output, LogLevelType level) {
 
 | _level_start | _0_Trace | _1_Debug | _2_Info | _3_Warning  | _4_Error    |
 |--------------|----------|----------|---------|-------------|-------------|
-| NULL         | NULL     | NULL     | NULL    | WarningNode | WarningNode |
-|              |          |          |         |             |             |
-|              |          |          |         |             |             |
+|              | NULL     | NULL     | NULL    | WarningNode | WarningNode |
+| _next        |          |          |         | NULL        | NULL        |
 
 >现在需要设置一个日志级别为Info, 定义一个输出节点InfoNode, 调用add_output后如下:
 
-| _level_start | _0_Trace | _1_Debug | _2_Info | _3_Warning | _4_Error |
-|---|---|---|---|---|---|---|
-||NULL|NULL|InfoNode|WarningNode|WarningNode|
-|_next|NULL|NULL|NULL|InfoNode|InfoNode|
+| _level_start | _0_Trace | _1_Debug | _2_Info  | _3_Warning  | _4_Error    |
+|--------------|----------|----------|----------|-------------|-------------|
+|              | NULL     | NULL     | InfoNode | WarningNode | WarningNode |
+| _next        |          |          | NULL     | InfoNode    | InfoNode    |
+| _next        |          |          |          | NULL        | NULL        |
 
 >再定义一个ErrorNode, 调用add_output后如下:
 
-| _level_start | _0_Trace | _1_Debug | _2_Info | _3_Warning | _4_Error |
-|---|---|---|---|---|---|---|
-||NULL|NULL|InfoNode|WarningNode|ErrorNode|
-|_next|NULL|NULL|NULL|InfoNode|WarningNode|
-|_next|NULL|NULL|NULL|NULL|InfoNode|
+| _level_start | _0_Trace | _1_Debug | _2_Info  | _3_Warning  | _4_Error    |
+|--------------|----------|----------|----------|-------------|-------------|
+|              | NULL     | NULL     | InfoNode | WarningNode | ErrorNode   |
+| _next        |          |          | NULL     | InfoNode    | WarningNode |
+| _next        |          |          |          | NULL        | InfoNode    |
+| _next        |          |          |          |             | NULL        |
 
 >最后需要Info有两个输出, 定义一个InfoNode@2, 调用add_output后如下:
 
-| _level_start | _0_Trace | _1_Debug | _2_Info | _3_Warning | _4_Error |
-|---|---|---|---|---|---|---|
-||NULL|NULL|InfoNode|WarningNode|ErrorNode|
-|_next|NULL|NULL|InfoNode@2|InfoNode|WarningNode|
-|_next|NULL|NULL|NULL|InfoNode@2|InfoNode|
-|_next|NULL|NULL|NULL|NULL|InfoNode@2|
+| _level_start | _0_Trace | _1_Debug | _2_Info    | _3_Warning  | _4_Error    |
+|--------------|----------|----------|------------|-------------|-------------|
+|              | NULL     | NULL     | InfoNode   | WarningNode | ErrorNode   |
+| _next        |          |          | InfoNode@2 | InfoNode    | WarningNode |
+| _next        |          |          | NULL       | InfoNode@2  | InfoNode    |
+| _next        |          |          |            | NULL        | InfoNode@2  |
+| _next        |          |          |            |             | NULL        |
 
 这样做的好处可以直接跳转至日志级别的入口, 并且日志级别具有传递性, 同时同个级别可以有多个输出.
 
