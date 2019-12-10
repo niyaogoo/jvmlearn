@@ -290,10 +290,11 @@ void LogOutputList::add_output(LogOutput* output, LogLevelType level) {
 看一下图例
 > 默认日志级别Warning, 定义一个输出节点WarningNode, 初始化后_level_start如下:
 
-| _level_start | _0_Trace | _1_Debug | _2_Info | _3_Warning | _4_Error |
-|---|---|---|---|---|---|---|
-||NULL|NULL|NULL|WarningNode|WarningNode|
-|_next|NULL|NULL|NULL|NULL|NULL|
+| _level_start | _0_Trace | _1_Debug | _2_Info | _3_Warning  | _4_Error    |
+|--------------|----------|----------|---------|-------------|-------------|
+| NULL         | NULL     | NULL     | NULL    | WarningNode | WarningNode |
+|              |          |          |         |             |             |
+|              |          |          |         |             |             |
 
 >现在需要设置一个日志级别为Info, 定义一个输出节点InfoNode, 调用add_output后如下:
 
