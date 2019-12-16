@@ -1,5 +1,18 @@
 # 虚拟机内存分配
 
+## ResourceObj
+ResourceObj用于存放对象, 可以存放在三种内存类型上
+1. STACK_OR_EMBEDDED: 栈
+2. RESOURCE_AREA: 以Arena的形式存放
+3. C_HEAP: 直接存放在C堆
+
+变量_allocation_t:用来校验ResourceObj对象地址与类型
+* _allocation_t[0]:校验和, 地址与类型反码求和
+* _allocation_t[1]:存放类型
+
+## 虚拟机内存类型
+### ResourceArea
+
 ### 物理机配置
 > 操作系统:linux x86-64, 内存16g
 
