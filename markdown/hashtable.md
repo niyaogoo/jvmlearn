@@ -14,3 +14,8 @@ _next最低位指定entry是否共享, 1表示共享, 0表示不共享.
 
 ## HashtableEntry
 继承BasicHashtableEntry, 维护字面量_literal
+
+## HashtableBucket
+entry所在的槽位(桶), 默认位hash % _table_size
+AS
+## B
