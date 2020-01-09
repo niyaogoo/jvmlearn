@@ -74,9 +74,71 @@ void Chunk::chop() {
 ## ChunkPool
 > hotspot/share/memory/arena.cpp#ChunkPool
 
-内存类型安全的Chunk池, 减少malloc/free的抖动, 未使用Mutex锁, 因为pool在线程初始化之前就已使用
+内存类型安全的Chunk池, 减少malloc/free的抖动, 未使用Mutex锁, 因为pool在线程初始化之前就已使用.
 
-以链表实现原始内存块
+在Threads::create_vm()->vm_init_globals()->chunkpool_init()进行初始化.
+
+默认4种类型, 对应Chunk中的tiny_size, init_size等, 分别有固定的size, 在分配Chunk时寻找对应的ChunkPool进行分配.
+* _large_pool
+* _medium_pool
+* _small_pool
+* _tiny_pool
+
+### 定义
+``` c++
+
+class ChunkPool: public CHeapObj<mtInternal> {
+  Chunk*       _first; //第一块chunk
+  size_t       _num_chunks;   // 未使用的chunk数量
+  size_t       _num_used;     // 已使用的chunk数量
+  const size_t _size;         // 每一块chunk的大小, 每一个ChunkPool都固定
+```
+
+### 内存分配与释放
+``` c++
+
+  //获取第一块chunk
+  void* get_first() {
+    Chunk* c = _first;
+    if (_first) {//注意如果没有调用free归还则first永远为NULL
+      _first = _first->next();//first指向的是最后一次归还的Chunk
+      _num_chunks--;//已使用-1
+    }
+    return c;
+  }
+
+  //分配方法入口, 分配一个新的chunk或者使用已有的
+  NOINLINE void* allocate(size_t bytes, AllocFailType alloc_failmode) {
+    //参数bytes必须固定, init_size, small_size等
+    assert(bytes == _size, "bad size");
+    void* p = NULL;
+    //使用TC锁时无法获取虚拟机锁(Mutex), 所以调用os::malloc应该在TC锁外部
+    { ThreadCritical tc;
+      _num_used++;
+      p = get_first();//see above
+    }
+    //无空闲chunk时进行os分配
+    if (p == NULL) p = os::malloc(bytes, mtChunk, CURRENT_PC);
+    if (p == NULL && alloc_failmode == AllocFailStrategy::EXIT_OOM) {
+      vm_exit_out_of_memory(bytes, OOM_MALLOC_ERROR, "ChunkPool::allocate");
+    }
+    return p;
+  }
+
+  //释放chunk
+  void free(Chunk* chunk) {
+    assert(chunk->length() + Chunk::aligned_overhead_size() == _size, "bad size");
+    //tc锁
+    ThreadCritical tc;
+    //已使用-1
+    _num_used--;
+
+    //归还chunk, pool->first指向归还的chunk
+    chunk->set_next(_first);
+    _first = chunk;
+    _num_chunks++;//未使用+1, see get_first::_num_chunks--
+  }
+```
 
 ## Area
 > hotspot/share/memory/area.hpp#Area
@@ -88,13 +150,69 @@ void Chunk::chop() {
 
   Chunk *_first;                //第一个chunk
   Chunk *_chunk;                //当前chunk
-  char *_hwm, *_max;            //高水位标记与当前chunk最大值
+  char *_hwm, *_max;            //指向当前chunk的bottom与top, _hwm指向当前空闲的内存单元, _max指向最大空闲堆顶
 ```
 
 ### 分配方法
 ``` c++
+//arena.hpp中重载了3个Amalloc方法
+void* Amalloc(size_t x, AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM)
+
+void *Amalloc_4(size_t x, AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM)
+
+void* Amalloc_D(size_t x, AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM)
+
+//Amalloc_4与Amalloc_D效果一样, 分配指定长度的内存, 必须与char*对齐, 在Symbol中使用
+//ResourceArea默认使用Amalloc
+
+void* Amalloc(size_t x, AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM) {
+  //ARENA_AMMLOC_ALIGNMENT必须2的幂次方, LP64为16字节
+  assert(is_power_of_2(ARENA_AMALLOC_ALIGNMENT) , "should be a power of 2");
+  //与ARENA_AMMLOC_ALIGHMENT对齐
+  x = ARENA_ALIGN(x);
+  debug_only(if (UseMallocOnly) return malloc(x);)
+  if (!check_for_overflow(x, "Arena::Amalloc", alloc_failmode))
+    return NULL;
+  //当前chunk无空闲分配新的chunk
+  if (_hwm + x > _max) {
+    return grow(x, alloc_failmode);
+  } else {
+    //在当前chunk分配
+    char *old = _hwm;
+    _hwm += x;
+    return old;
+  }
+}
+
+// area无空闲chunk时分配新的chunk
 // 分配不低于size_t x的空间, alloc_failmode分配失败策略, 默认退出并抛出oom
-void* grow(size_t x, AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM);
+void* Arena::grow(size_t x, AllocFailType alloc_failmode) {
+  // Get minimal required size.  Either real big, or even bigger for giant objs
+  size_t len = MAX2(x, (size_t) Chunk::size);
+
+  Chunk *k = _chunk;//获取当前chunk的地址
+  //尝试将当前_chunk指向新分配的chunk
+  _chunk = new (alloc_failmode, len) Chunk(len);
+  
+  if (_chunk == NULL) {
+    //如果chunk分配失败重置_chunk
+    _chunk = k;
+    return NULL;
+  }
+  //如果老的_chunk不为NULL,将原有的chunk->next指向新的chunk
+  if (k) k->set_next(_chunk);
+  //否则_first与_chunk一样指向新分配的chunk
+  else _first = _chunk;
+  //将area中的_hwm与_max设置为新分配chunk的bottom与top
+  _hwm  = _chunk->bottom();
+  _max =  _chunk->top();
+  //设置area的长度
+  set_size_in_bytes(size_in_bytes() + len);
+  //分配完chunk后偏移x,让出第一块需要的内存并返回
+  void* result = _hwm;
+  _hwm += x;
+  return result;
+}
 ```
 
 ## ResourceArea
@@ -111,8 +229,8 @@ void* grow(size_t x, AllocFailType alloc_failmode = AllocFailStrategy::EXIT_OOM)
 void initialize(Thread *thread) {
     _area = thread->resource_area();//使用线程中的ResourceArea
     _chunk = _area->_chunk;//指向当前操作的chunk, 释放时使用
-    _hwm = _area->_hwm;//高水位
-    _max= _area->_max;//最大值
+    _hwm = _area->_hwm;//area管理的chunk的bottom
+    _max= _area->_max;//area管理的chunk的max
     _size_in_bytes = _area->size_in_bytes();//已使用的空间,单位byte, 释放时使用
     debug_only(_area->_nesting++;)
     assert( _area->_nesting > 0, "must stack allocate RMs" );
@@ -195,5 +313,49 @@ enum MemoryType {
 };
 
 typedef MemoryType MEMFLAGS;
+
+```
+
+## ThreadCritical
+> hotspot/share/runtime/threadCritical.hpp
+
+在虚拟机初始化完毕之前使用该锁, 全局唯一
+
+``` c++
+//linux tc实现
+//hotspot/os/linux/threadCritical_linux.cpp
+
+static pthread_t             tc_owner = 0;//锁拥有者
+static pthread_mutex_t       tc_mutex = PTHREAD_MUTEX_INITIALIZER;//锁
+static int                   tc_count = 0;//可重入计数器
+
+//自动构造
+ThreadCritical::ThreadCritical() {
+  pthread_t self = pthread_self();
+  //如果当前不是自己则尝试获取
+  if (self != tc_owner) {
+    int ret = pthread_mutex_lock(&tc_mutex);
+    guarantee(ret == 0, "fatal error with pthread_mutex_lock()");
+    assert(tc_count == 0, "Lock acquired with illegal reentry count.");
+    tc_owner = self;
+  }
+  //已获得锁, 重入+1
+  tc_count++;
+}
+
+//自动析构
+ThreadCritical::~ThreadCritical() {
+  assert(tc_owner == pthread_self(), "must have correct owner");
+  assert(tc_count > 0, "must have correct count");
+
+  //重入-1
+  tc_count--;
+  //重入归零后释放锁
+  if (tc_count == 0) {
+    tc_owner = 0;
+    int ret = pthread_mutex_unlock(&tc_mutex);
+    guarantee(ret == 0, "fatal error with pthread_mutex_unlock()");
+  }
+}
 
 ```
