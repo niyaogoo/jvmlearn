@@ -9,7 +9,7 @@
 * 访问内存所属的位置
 * 指针压缩与解压
 
-各个属性正交
+以上各个属性正交, 实现方式使用了位操作、模板类、模板函数, 作为技术手段可以学习一下。
 
 ``` c++
 // hostpot/share/oops/accessDecorators.hpp
@@ -179,5 +179,79 @@ namespace AccessInternal {
 // hotspot/share/oops/access.hpp
 //该文件提供所有暴露的API
 
+//Access提供所有的API, 使用0装饰
+//注意类模板的装饰参数为调用者定义, 与verify*函数的expected_decorators的函数模板参数用途不一样.
+//verify*函数的模板参数用于验证调用者提供的各装饰位是否正确,并且相关不能正交的位不能正交
+template <DecoratorSet decorators = DECORATORS_NONE>
+class Access: public AllStatic {
+  
+  //主要验证Access类模板参数的装饰不能正交的不正交, 比如一个访问操作不是同时作用于堆与根上
+  //主验证函数, 其他verify*相关添加相关预期装饰位并调用该函数
+  template <DecoratorSet expected_decorators>
+  static void verify_decorators();
+
+  //用于验证oop相关装饰位, 只允许AS,IN,非ON_UNKNOWN_OOP_REF的其他ON, 
+  template <DecoratorSet expected_mo_decorators>
+  static void verify_oop_decorators() {
+    //只允许以下装饰位
+    const DecoratorSet oop_decorators = AS_DECORATOR_MASK | IN_DECORATOR_MASK |
+                                        (ON_DECORATOR_MASK ^ ON_UNKNOWN_OOP_REF) |//不允许ON_KNOWN_OOP_REF
+                                        IS_ARRAY | IS_NOT_NULL | IS_DEST_UNINITIALIZED;
+    verify_decorators<expected_mo_decorators | oop_decorators>();
+  }
+  //其他验证类似
+
+  //访问加载型的装饰位, 允许以下装饰位
+  static const DecoratorSet load_mo_decorators = MO_UNORDERED | MO_VOLATILE | MO_RELAXED | MO_ACQUIRE | MO_SEQ_CST;
+
+  //== API ==
+  //Oop访问
+  template <typename P>
+  static inline AccessInternal::OopLoadProxy<P, decorators> oop_load(P* addr) {
+    //验证oop方位装饰位, load_mo_decorators见上
+    verify_oop_decorators<load_mo_decorators>();
+    
+    return AccessInternal::OopLoadProxy<P, decorators>(addr);
+  }
+}
+
+//验证实现
+template <DecoratorSet decorators>//模板类调用者指定装饰位
+template <DecoratorSet expected_decorators>//模板函数指定的预期装饰位
+void Access<decorators>::verify_decorators() {
+  //检查是否有不允许的装饰位
+  STATIC_ASSERT((~expected_decorators & decorators) == 0);
+  const DecoratorSet barrier_strength_decorators = decorators & AS_DECORATOR_MASK;
+  //所有屏障位不能正交
+  STATIC_ASSERT(barrier_strength_decorators == 0 || (
+    (barrier_strength_decorators ^ AS_NO_KEEPALIVE) == 0 ||
+    (barrier_strength_decorators ^ AS_RAW) == 0 ||
+    (barrier_strength_decorators ^ AS_NORMAL) == 0
+  ));
+  //所有引用位不能正交
+  const DecoratorSet ref_strength_decorators = decorators & ON_DECORATOR_MASK;
+  STATIC_ASSERT(ref_strength_decorators == 0 || (
+    (ref_strength_decorators ^ ON_STRONG_OOP_REF) == 0 ||
+    (ref_strength_decorators ^ ON_WEAK_OOP_REF) == 0 ||
+    (ref_strength_decorators ^ ON_PHANTOM_OOP_REF) == 0 ||
+    (ref_strength_decorators ^ ON_UNKNOWN_OOP_REF) == 0
+  ));
+  //所有内存排序不能正交
+  const DecoratorSet memory_ordering_decorators = decorators & MO_DECORATOR_MASK;
+  STATIC_ASSERT(memory_ordering_decorators == 0 || (
+    (memory_ordering_decorators ^ MO_UNORDERED) == 0 ||
+    (memory_ordering_decorators ^ MO_VOLATILE) == 0 ||
+    (memory_ordering_decorators ^ MO_RELAXED) == 0 ||
+    (memory_ordering_decorators ^ MO_ACQUIRE) == 0 ||
+    (memory_ordering_decorators ^ MO_RELEASE) == 0 ||
+    (memory_ordering_decorators ^ MO_SEQ_CST) == 0
+  ));
+  //无法同时在堆与本地内存
+  const DecoratorSet location_decorators = decorators & IN_DECORATOR_MASK;
+  STATIC_ASSERT(location_decorators == 0 || (
+    (location_decorators ^ IN_NATIVE) == 0 ||
+    (location_decorators ^ IN_HEAP) == 0
+  ));
+}
 
 ```
