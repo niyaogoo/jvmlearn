@@ -9,7 +9,13 @@
 * 访问内存所属的位置
 * 指针压缩与解压
 
-以上各个属性正交, 实现方式使用了位操作、模板类、模板函数, 作为技术手段可以学习一下。
+实现方式使用了位操作、模板类、模板函数, 作为技术手段可以学习一下。
+
+## 装饰位说明
+所有的内存访问会带一个64位整型, 每一位代表一个访问属性, 属性根据目标分为不同的属性类, 
+所有的属性类相交实现.
+
+如内存排序共定义了6种属性, 每一种代表该次访问应该对应的内存排序类型.
 
 ``` c++
 // hostpot/share/oops/accessDecorators.hpp
@@ -175,6 +181,13 @@ namespace AccessInternal {
 }
 ```
 
+## 访问接口实现
+
+access翻译为访问, 一次访问可能是加载(load), 也可能是储存(store)
+access.hpp提供了一些访问接口, 按照以下顺序执行
+
+1. 首先提供一些默认的装饰属性, 将CV限定符去除(const volatile)
+
 ``` c++
 // hotspot/share/oops/access.hpp
 //该文件提供所有暴露的API
@@ -205,53 +218,281 @@ class Access: public AllStatic {
   static const DecoratorSet load_mo_decorators = MO_UNORDERED | MO_VOLATILE | MO_RELAXED | MO_ACQUIRE | MO_SEQ_CST;
 
   //== API ==
-  //Oop访问
+
+  //Oop访问, 该接口返回一个oop或narrowOop指针
   template <typename P>
   static inline AccessInternal::OopLoadProxy<P, decorators> oop_load(P* addr) {
     //验证oop方位装饰位, load_mo_decorators见上
     verify_oop_decorators<load_mo_decorators>();
     
+    //提供一个代理类, 执行具体的访问, 这里是核心代码!!!, 见OopLoadProxy说明
     return AccessInternal::OopLoadProxy<P, decorators>(addr);
+  }
+
+  //验证实现
+  template <DecoratorSet decorators>//模板类调用者指定装饰位
+  template <DecoratorSet expected_decorators>//模板函数指定的预期装饰位
+  void Access<decorators>::verify_decorators() {
+    //检查是否有不允许的装饰位
+    STATIC_ASSERT((~expected_decorators & decorators) == 0);
+    const DecoratorSet barrier_strength_decorators = decorators & AS_DECORATOR_MASK;
+    //屏障唯一
+    STATIC_ASSERT(barrier_strength_decorators == 0 || (
+      (barrier_strength_decorators ^ AS_NO_KEEPALIVE) == 0 ||
+      (barrier_strength_decorators ^ AS_RAW) == 0 ||
+      (barrier_strength_decorators ^ AS_NORMAL) == 0
+    ));
+    //引用属性唯一
+    const DecoratorSet ref_strength_decorators = decorators & ON_DECORATOR_MASK;
+    STATIC_ASSERT(ref_strength_decorators == 0 || (
+      (ref_strength_decorators ^ ON_STRONG_OOP_REF) == 0 ||
+      (ref_strength_decorators ^ ON_WEAK_OOP_REF) == 0 ||
+      (ref_strength_decorators ^ ON_PHANTOM_OOP_REF) == 0 ||
+      (ref_strength_decorators ^ ON_UNKNOWN_OOP_REF) == 0
+    ));
+    //内存排序属性唯一
+    const DecoratorSet memory_ordering_decorators = decorators & MO_DECORATOR_MASK;
+    STATIC_ASSERT(memory_ordering_decorators == 0 || (
+      (memory_ordering_decorators ^ MO_UNORDERED) == 0 ||
+      (memory_ordering_decorators ^ MO_VOLATILE) == 0 ||
+      (memory_ordering_decorators ^ MO_RELAXED) == 0 ||
+      (memory_ordering_decorators ^ MO_ACQUIRE) == 0 ||
+      (memory_ordering_decorators ^ MO_RELEASE) == 0 ||
+      (memory_ordering_decorators ^ MO_SEQ_CST) == 0
+    ));
+    //无法同时在堆与本地内存
+    const DecoratorSet location_decorators = decorators & IN_DECORATOR_MASK;
+    STATIC_ASSERT(location_decorators == 0 || (
+      (location_decorators ^ IN_NATIVE) == 0 ||
+      (location_decorators ^ IN_HEAP) == 0
+    ));
   }
 }
 
-//验证实现
-template <DecoratorSet decorators>//模板类调用者指定装饰位
-template <DecoratorSet expected_decorators>//模板函数指定的预期装饰位
-void Access<decorators>::verify_decorators() {
-  //检查是否有不允许的装饰位
-  STATIC_ASSERT((~expected_decorators & decorators) == 0);
-  const DecoratorSet barrier_strength_decorators = decorators & AS_DECORATOR_MASK;
-  //所有屏障位不能正交
-  STATIC_ASSERT(barrier_strength_decorators == 0 || (
-    (barrier_strength_decorators ^ AS_NO_KEEPALIVE) == 0 ||
-    (barrier_strength_decorators ^ AS_RAW) == 0 ||
-    (barrier_strength_decorators ^ AS_NORMAL) == 0
-  ));
-  //所有引用位不能正交
-  const DecoratorSet ref_strength_decorators = decorators & ON_DECORATOR_MASK;
-  STATIC_ASSERT(ref_strength_decorators == 0 || (
-    (ref_strength_decorators ^ ON_STRONG_OOP_REF) == 0 ||
-    (ref_strength_decorators ^ ON_WEAK_OOP_REF) == 0 ||
-    (ref_strength_decorators ^ ON_PHANTOM_OOP_REF) == 0 ||
-    (ref_strength_decorators ^ ON_UNKNOWN_OOP_REF) == 0
-  ));
-  //所有内存排序不能正交
-  const DecoratorSet memory_ordering_decorators = decorators & MO_DECORATOR_MASK;
-  STATIC_ASSERT(memory_ordering_decorators == 0 || (
-    (memory_ordering_decorators ^ MO_UNORDERED) == 0 ||
-    (memory_ordering_decorators ^ MO_VOLATILE) == 0 ||
-    (memory_ordering_decorators ^ MO_RELAXED) == 0 ||
-    (memory_ordering_decorators ^ MO_ACQUIRE) == 0 ||
-    (memory_ordering_decorators ^ MO_RELEASE) == 0 ||
-    (memory_ordering_decorators ^ MO_SEQ_CST) == 0
-  ));
-  //无法同时在堆与本地内存
-  const DecoratorSet location_decorators = decorators & IN_DECORATOR_MASK;
-  STATIC_ASSERT(location_decorators == 0 || (
-    (location_decorators ^ IN_NATIVE) == 0 ||
-    (location_decorators ^ IN_HEAP) == 0
-  ));
-}
+```
+
+accessBackend.hpp提供具体实现
+
+``` c++
+// hotspot/share/oops/accessBackend.hpp
+
+//第一步, 设置默认的访问属性(decorators)
+//OopLoadProxy作为Oop加载的代理类, P地址类型
+template <typename P, DecoratorSet decorators>
+class OopLoadProxy: public StackObj {
+private:
+  //访问地址
+  P *const _addr;
+public:
+  OopLoadProxy(P* addr) : _addr(addr) {}
+
+  //操作符重载oop, 赋值oop时调用, load见下
+  inline operator oop() {
+    return load<decorators | INTERNAL_VALUE_IS_OOP, P, oop>(_addr);
+  }
+
+  //操作符重载oop, 赋值narrowOop时调用, load见下
+  inline operator narrowOop() {
+    return load<decorators | INTERNAL_VALUE_IS_OOP, P, narrowOop>(_addr);
+  }
+};
+
+//第一步, 去除cv限定符, P为地址类型, T为值类型
+//注意参数P如果有volatile限定符会增加访问属性MO_VOLATILE
+template <DecoratorSet decorators, typename P, typename T>
+  inline T load(P* addr) {
+    //验证decorators是否由INTERNAL_VALUE_IS_OOP标志,返回值必须是指针, 整形或浮点类型
+    verify_types<decorators, T>();
+    //去除参数的cv限定符
+    typedef typename Decay<P>::type DecayedP;
+    //验证如果有INTERNAL_VALUE_IS_OOP位则使用oop或narrowOop
+    //如果没有则使用去除cv限定符的返回值类型
+    typedef typename Conditional<HasDecorator<decorators, INTERNAL_VALUE_IS_OOP>::value,
+                                 typename OopOrNarrowOop<T>::type,
+                                 typename Decay<T>::type>::type DecayedT;
+    //如果参数P有volatile限定符但是装饰位没有MO_VOLATILE位, 则使用默认的内存排序位.
+    const DecoratorSet expanded_decorators = DecoratorFixup<
+      (IsVolatile<P>::value && !HasDecorator<decorators, MO_DECORATOR_MASK>::value) ?
+      (MO_VOLATILE | decorators) : decorators>::value;
+    
+    //调用load_reduce_types
+    //expanded_decorators为上一步可能添加了volatile属性位的decorators
+    //DecayedT为去除cv限定符的返回类型
+    //将参数也去除cv限定符并const_cast
+    //调用类型限定加载函数
+    return load_reduce_types<expanded_decorators, DecayedT>(const_cast<DecayedP*>(addr));
+  }
+
+  //第二步, 限定类型(reduce type), P为地址类型， T为值类型, 
+  //对于非oop(oop或narrowOop)， P与T类型必须完全一致, P的其他三种情况限定规则如下, 列为P, 行为T
+  // |           | HeapWord  |   oop   | narrowOop |
+  // |   oop     |  rt-comp  | hw-none |  hw-comp  |
+  // | narrowOop |     x     |    x    |  hw-none  |
+  // x表示不支持
+  // rt-comp表示运行时检查oop是否需要压缩/解压
+  // hw-non 表示运行前已知将不使用oop压缩/解压
+  // hw-comp 表示运行前已知将使用oop压缩/解压
+  //例如P为HeapWord， T只能是oop并且是运行时检查压缩
+  //P为narrowOop，T可以是oop(hw-comp), 也可以是narrowOop(hw-none)
+  //load_reduce_types, 指针压缩版本
+  template <DecoratorSet decorators, typename T>
+  inline typename OopOrNarrowOop<T>::type load_reduce_types(narrowOop* addr) {
+    //增加属性位
+    const DecoratorSet expanded_decorators = decorators | INTERNAL_CONVERT_COMPRESSED_OOP |
+                                             INTERNAL_RT_USE_COMPRESSED_OOPS;
+    //尝试运行前分发, OopOrNarrowOop指定oop或narrowOop, 这里将进入第三步                                         
+    return PreRuntimeDispatch::load<expanded_decorators, typename OopOrNarrowOop<T>::type>(addr);
+  }
+
+  //..
+  //..
+
+  //注意这是PreRuntimeDispatch中的函数
+  //第三步, 运行前分发, 这一步尝试避免运行时分发, 当属性位不含有INTERNAL_BT_BARRIER_ON_PRIMITIVES与INTERNAL_VALUE_IS_OOP时使用运行前分发
+  //EnableIf元函数只有参数1为true时参数2才会被定义为type, 包括void
+  template <DecoratorSet decorators, typename T>
+  inline static typename EnableIf<
+    !HasDecorator<decorators, AS_RAW>::value, T>::type
+  load(void* addr) {
+    //不含有INTERNAL_BT_BARRIER_ON_PRIMITIVES,INTERNAL_VALUE_IS_OOP属性位使用运行前分发
+    if (is_hardwired_primitive<decorators>()) {
+      //增加AS_RAW属性为, 调用另一个函数模板实例
+      const DecoratorSet expanded_decorators = decorators | AS_RAW;
+      return PreRuntimeDispatch::load<expanded_decorators, T>(addr);
+    } else {
+      //见第四步, RuntimeDispatch
+      return RuntimeDispatch<decorators, T, BARRIER_LOAD>::load(addr);
+    }
+  }
+
+  //硬件直接加载函数模板实例
+  //CanHardwireRaws判断属性位是否是直接方位或指针压缩访问或运行时压缩访问
+  template <DecoratorSet decorators, typename T>
+  inline static typename EnableIf<
+    HasDecorator<decorators, AS_RAW>::value && CanHardwireRaw<decorators>::value, T>::type
+  load(void* addr) {
+    typedef RawAccessBarrier<decorators & RAW_DECORATOR_MASK> Raw;
+    if (HasDecorator<decorators, INTERNAL_VALUE_IS_OOP>::value) {
+      return Raw::template oop_load<T>(addr);
+    } else {
+      return Raw::template load<T>(addr);
+    }
+  }
+
+  //注意以下代码是RawAccessBarrier类
+  template <typename T>
+  static inline T load(void* addr) {
+    return load_internal<decorators, T>(addr);
+  }
+
+  //内存排序属性位MO_ACQUIRE实现版本, acquire语义
+  template <DecoratorSet decorators>
+  template <DecoratorSet ds, typename T>
+  inline typename EnableIf<
+    HasDecorator<ds, MO_ACQUIRE>::value, T>::type
+  RawAccessBarrier<decorators>::load_internal(void* addr) {
+    //将跳转至atomic.hpp, atomic见另外笔记
+    return Atomic::load_acquire(reinterpret_cast<const volatile T*>(addr));
+  }
+
+    //第四步, 运行时分发, 提供是需要要压缩/解压oop, 使用何种垃圾回收实现
+  //实现模式为提供一个函数指针, 在第一次调用时会确认具体过程, 并再接下来的调用执行该过程
+  //接第三步源码中的return RuntimeDispatch<decorators, T, BARRIER_LOAD>::load(addr);
+  //对应第三步类模板实例, BARRIER_LOAD
+  //为方便阅读将相关源码进行了合并
+
+  template <DecoratorSet decorators, typename T>
+  struct RuntimeDispatch<decorators, T, BARRIER_LOAD>: AllStatic {
+    //访问函数指针, 注意这个函数指针指向load_init函数, 第一次调用调用后指针指向具体实现
+    typedef typename AccessFunction<decorators, T, BARRIER_LOAD>::type func_t;
+    static func_t _load_func = &load_init;
+    
+    static T load_init(void* addr) {
+      //BarrierResolver见下面详解
+      func_t function = BarrierResolver<decorators, func_t, BARRIER_LOAD>::resolve_barrier();
+      //已找到具体实现， 替换_load_func指针, 接下来的所有调用都会执行上面指定的代码, 笔记中的oop_access_barrier
+      _load_func = function;
+      return function(addr);
+    }
+
+    //人畜无害
+    static inline T load(void* addr) {
+      return _load_func(addr);
+    }
+  };
+
+  //对每个访问增加一些屏障, 比如压缩/解压屏障和其他在BarrierSet中定义屏障
+  //oop版本
+  template <DecoratorSet decorators, typename FunctionPointerT, BarrierType barrier_type>
+  struct BarrierResolver: public AllStatic {
+    template <DecoratorSet ds>
+    //EnableIf第一个参数为true时第二个参数有效, false时编译失败因为没有对应type
+    static typename EnableIf<
+      HasDecorator<ds, INTERNAL_VALUE_IS_OOP>::value,
+      FunctionPointerT>::type
+    resolve_barrier_gc() {
+      BarrierSet* bs = BarrierSet::barrier_set();
+      assert(bs != NULL, "GC barriers invoked before BarrierSet is set");
+      switch (bs->kind()) {
+      //FOR_EACH_CONCRETE_BARRIER_SET_DO定义见下方
+#define BARRIER_SET_RESOLVE_BARRIER_CLOSURE(bs_name)                    \
+        case BarrierSet::bs_name: {                                     \
+          return PostRuntimeDispatch<typename BarrierSet::GetType<BarrierSet::bs_name>::type:: \
+            AccessBarrier<ds>, barrier_type, ds>::oop_access_barrier; \
+        }                                                               \
+        break;
+        //BarrierSet::GetType<BarrierSet::bs_name>::type::AccessBarrier<ds>的g1实例版本见下方， 最后返回具体AccessBarrie中的oop_access_barrier函数指针
+        FOR_EACH_CONCRETE_BARRIER_SET_DO(BARRIER_SET_RESOLVE_BARRIER_CLOSURE)
+#undef BARRIER_SET_RESOLVE_BARRIER_CLOSURE
+
+      default:
+        fatal("BarrierSet AccessBarrier resolving not implemented");
+        return NULL;
+      };
+    }
+
+    //是否使用oop压缩
+    static FunctionPointerT resolve_barrier_rt() {
+      if (UseCompressedOops) {
+        const DecoratorSet expanded_decorators = decorators | INTERNAL_RT_USE_COMPRESSED_OOPS;
+        return resolve_barrier_gc<expanded_decorators>();
+      } else {
+        return resolve_barrier_gc<decorators>();
+      }
+    }
+
+    //入口
+    static FunctionPointerT resolve_barrier() {
+      return resolve_barrier_rt();
+    }
+  }
+
+  //第五步, 所有屏障已经确定, PostRuntime分发, 根据确定的地址类型再次模板是实例化, 比如oop或narrowOop
+  //BARRIER_LOAD版本, 
+  template <class GCBarrierType, DecoratorSet decorators>
+  struct PostRuntimeDispatch<GCBarrierType, BARRIER_LOAD, decorators>: public AllStatic {
+    template <typename T>
+    static T access_barrier(void* addr) {
+      return GCBarrierType::load_in_heap(reinterpret_cast<T*>(addr));
+    }
+
+    //oop函数, 对应RuntimeDispatcher中需要的返回值, 执行具体加载函数
+    static oop oop_access_barrier(void* addr) {
+      typedef typename HeapOopType<decorators>::type OopType;
+      if (HasDecorator<decorators, IN_HEAP>::value) {
+        return GCBarrierType::oop_load_in_heap(reinterpret_cast<OopType*>(addr));
+      } else {
+        return GCBarrierType::oop_load_not_in_heap(reinterpret_cast<OopType*>(addr));
+      }
+    }
+  };
+
+  //barrierSetConfig.hpp中定义的具体barrier set
+  #define FOR_EACH_CONCRETE_BARRIER_SET_DO(f)          \
+  f(CardTableBarrierSet)                             \
+  EPSILONGC_ONLY(f(EpsilonBarrierSet))               \
+  G1GC_ONLY(f(G1BarrierSet))                         \
+  SHENANDOAHGC_ONLY(f(ShenandoahBarrierSet))         \
+  ZGC_ONLY(f(ZBarrierSet))
 
 ```
